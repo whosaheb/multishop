@@ -8,6 +8,12 @@ import { AuthModule } from './auth/auth.module';
 import { UsersModule } from './users/users.module';
 import { ShopsModule } from './shops/shops.module';
 import { AssignmentsModule } from './assignments/assignments.module';
+import { ItemsModule } from './items/items.module';
+import { NotificationsModule } from './notifications/notifications.module';
+import { BillSequenceModule } from './bill-sequence/bill-sequence.module';
+import { BillsModule } from './bills/bills.module';
+import { InventoryModule } from './inventory/inventory.module';
+import { ReportsModule } from './reports/reports.module';
 
 @Module({
   imports: [
@@ -26,12 +32,12 @@ import { AssignmentsModule } from './assignments/assignments.module';
     UsersModule,
     ShopsModule,
     AssignmentsModule,
-    // Phase 2+ modules (items, categories, units, prices, bills,
-    // bill-review, bill-versions, bill-attachments, inventory,
-    // stock-transfers, stock-adjustments, bill-sequence, notifications,
-    // reports) plug in here the same way, following this module's pattern:
-    // Prisma via CommonModule, mutations via AuditService, guards via
-    // JwtAuthGuard + RolesGuard + @Roles(...).
+    ItemsModule,
+    NotificationsModule,
+    BillSequenceModule,
+    BillsModule,
+    InventoryModule,
+    ReportsModule,
   ],
   providers: [
     {

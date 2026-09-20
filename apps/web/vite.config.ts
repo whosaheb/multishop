@@ -82,6 +82,14 @@ export default defineConfig({
             return;
           }
 
+          // In dev server without a proxy to NestJS, don't let /api routes fall through to index.html
+          if (req.url?.startsWith('/api/')) {
+            res.statusCode = 404;
+            res.setHeader('Content-Type', 'application/json');
+            res.end(JSON.stringify({ message: `Route ${req.url} not handled by server, using client store` }));
+            return;
+          }
+
           next();
         });
       },
