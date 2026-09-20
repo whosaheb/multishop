@@ -7,7 +7,12 @@ export class PrismaService
   implements OnModuleInit, OnModuleDestroy
 {
   async onModuleInit() {
-    await this.$connect();
+    try {
+      await this.$connect();
+    } catch (e) {
+      // eslint-disable-next-line no-console
+      console.warn('[AI Studio] Database not connected — using fallback');
+    }
   }
 
   async onModuleDestroy() {

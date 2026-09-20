@@ -70,6 +70,42 @@ export default function LoginPage() {
           >
             {submitting ? 'Signing in…' : 'Sign in'}
           </button>
+
+          <div className="mt-4 flex flex-wrap items-center justify-center gap-2 text-xs text-slate-400">
+            <span>Quick fill:</span>
+            <button
+              type="button"
+              onClick={() => {
+                setMobileNumber('9999900001');
+                setPassword('AdminPass123!');
+              }}
+              className="text-indigo-400 underline hover:text-indigo-300"
+            >
+              Admin
+            </button>
+            <span>·</span>
+            <button
+              type="button"
+              onClick={() => {
+                setMobileNumber('9999900002');
+                setPassword('ManagerPass123!');
+              }}
+              className="text-indigo-400 underline hover:text-indigo-300"
+            >
+              Manager
+            </button>
+            <span>·</span>
+            <button
+              type="button"
+              onClick={() => {
+                setMobileNumber('9999900003');
+                setPassword('EmployeePass123!');
+              }}
+              className="text-indigo-400 underline hover:text-indigo-300"
+            >
+              Employee
+            </button>
+          </div>
         </form>
 
         <p className="mt-6 text-center text-xs text-slate-500">

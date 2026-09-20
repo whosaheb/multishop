@@ -8,7 +8,7 @@
  *   9999900003 / EmployeePass123! (EMPLOYEE, assigned to "Shop A")
  */
 import { PrismaClient, Role, UnitType } from '@prisma/client';
-import * as argon2 from 'argon2';
+import * as argon2 from '@node-rs/argon2';
 
 const prisma = new PrismaClient();
 

@@ -1,6 +1,6 @@
 import { Injectable, UnauthorizedException } from '@nestjs/common';
 import { JwtService } from '@nestjs/jwt';
-import * as argon2 from 'argon2';
+import * as argon2 from '@node-rs/argon2';
 import { PrismaService } from '../common/services/prisma.service';
 import { SessionService } from './session.service';
 import { LoginDto } from './dto/login.dto';

@@ -1,0 +1,6 @@
+{
+  "name": "Multi-Shop Sales & Inventory",
+  "description": "Multi-shop sales and inventory management web application with role-based access for Admin, Manager, and Employee.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
