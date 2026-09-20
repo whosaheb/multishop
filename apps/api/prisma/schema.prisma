@@ -1,0 +1,559 @@
+// ============================================================================
+// Multi-Shop Sales, Inventory & Bill Verification System
+// Prisma schema covering the full domain model from the project spec.
+// No hard deletes on business records: soft-delete / active flags are used
+// instead (see `deletedAt`, `isActive`, `status` fields throughout).
+// ============================================================================
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+// ---------------------------------------------------------------------------
+// Users, Roles, Shops, Assignments
+// ---------------------------------------------------------------------------
+
+enum Role {
+  ADMIN
+  MANAGER
+  EMPLOYEE
+}
+
+model User {
+  id           String    @id @default(cuid())
+  fullName     String
+  mobileNumber String    @unique
+  passwordHash String
+  role         Role
+  isActive     Boolean   @default(true)
+  deletedAt    DateTime? // soft delete only; never hard-deleted
+  createdAt    DateTime  @default(now())
+  updatedAt    DateTime  @updatedAt
+
+  shopAssignments        EmployeeShopAssignment[]
+  billsCreated           Bill[]                    @relation("BillCreatedBy")
+  billVersionsAuthored   BillVersion[]              @relation("BillVersionAuthor")
+  billReviews            BillReview[]               @relation("BillReviewer")
+  modificationRequests   BillModificationRequest[]  @relation("ModificationRequester")
+  modificationsResolved  BillModificationRequest[]  @relation("ModificationResolver")
+  stockTransfersMade     StockTransfer[]            @relation("StockTransferBy")
+  stockAdjustmentsMade   StockAdjustment[]          @relation("StockAdjustmentBy")
+  inventoryTransactions  InventoryTransaction[]     @relation("InventoryTransactionBy")
+  itemPricesSet          ItemPrice[]                @relation("ItemPriceSetBy")
+  notifications          Notification[]
+  auditLogs              AuditLog[]
+  sequenceEventsResolved BillSequenceEvent[]        @relation("SequenceEventResolvedBy")
+
+  @@index([role])
+  @@index([isActive])
+}
+
+model Shop {
+  id        String     @id @default(cuid())
+  name      String     @unique
+  address   String?
+  status    ShopStatus @default(ACTIVE)
+  createdAt DateTime   @default(now())
+  updatedAt DateTime   @updatedAt
+
+  assignments           EmployeeShopAssignment[]
+  bills                 Bill[]
+  inventoryTransactions InventoryTransaction[]
+  transfersOut          StockTransfer[]           @relation("TransferFromShop")
+  transfersIn           StockTransfer[]           @relation("TransferToShop")
+  stockAdjustments      StockAdjustment[]
+  billPads              BillPad[]
+
+  @@index([status])
+}
+
+enum ShopStatus {
+  ACTIVE
+  INACTIVE
+}
+
+/// An employee is assigned to exactly one shop at a time. Historical
+/// assignments are preserved (never overwritten) so bills always retain
+/// the shop the employee actually belonged to when the bill was created.
+model EmployeeShopAssignment {
+  id         String    @id @default(cuid())
+  employee   User      @relation(fields: [employeeId], references: [id])
+  employeeId String
+  shop       Shop      @relation(fields: [shopId], references: [id])
+  shopId     String
+  startDate  DateTime  @default(now())
+  endDate    DateTime? // null = currently active assignment
+  createdAt  DateTime  @default(now())
+
+  @@index([employeeId, endDate])
+  @@index([shopId])
+}
+
+// ---------------------------------------------------------------------------
+// Sessions (in-memory at runtime; persisted here only for audit/history use).
+// The live "one active session" enforcement happens in application memory
+// per the spec — this table backs optional history/reporting, not the
+// hot-path session check.
+// ---------------------------------------------------------------------------
+
+model UserSessionLog {
+  id         String    @id @default(cuid())
+  userId     String
+  tokenId    String    @unique // jti claim
+  issuedAt   DateTime  @default(now())
+  revokedAt  DateTime?
+  revokedReason String?
+  ipAddress  String?
+  userAgent  String?
+
+  @@index([userId])
+}
+
+// ---------------------------------------------------------------------------
+// Categories, Items, Units, Prices
+// ---------------------------------------------------------------------------
+
+model Category {
+  id        String   @id @default(cuid())
+  name      String   @unique
+  createdAt DateTime @default(now())
+
+  items Item[]
+}
+
+enum UnitType {
+  WEIGHT
+  VOLUME
+  LENGTH
+  COUNT
+}
+
+model Unit {
+  id       String   @id @default(cuid())
+  name     String   @unique // e.g. "Kilogram"
+  symbol   String   @unique // e.g. "kg"
+  type     UnitType
+  // Factor to convert 1 of this unit into the canonical base unit of its type
+  // (gram for WEIGHT, milliliter for VOLUME, millimeter for LENGTH, 1 for COUNT-type units
+  // which are only convertible within explicitly defined UnitConversion rows).
+  toCanonicalFactor Decimal @db.Decimal(20, 8)
+
+  itemsAsBaseUnit    Item[] @relation("ItemBaseUnit")
+  itemsAsSellingUnit Item[] @relation("ItemSellingUnit")
+
+  conversionsFrom UnitConversion[] @relation("ConversionFromUnit")
+  conversionsTo   UnitConversion[] @relation("ConversionToUnit")
+}
+
+/// Explicit conversion rows for custom/count units that aren't part of a
+/// simple metric scale (e.g. "1 Box = 12 Piece").
+model UnitConversion {
+  id           String  @id @default(cuid())
+  fromUnit     Unit    @relation("ConversionFromUnit", fields: [fromUnitId], references: [id])
+  fromUnitId   String
+  toUnit       Unit    @relation("ConversionToUnit", fields: [toUnitId], references: [id])
+  toUnitId     String
+  factor       Decimal @db.Decimal(20, 8) // 1 fromUnit = factor * toUnit
+
+  @@unique([fromUnitId, toUnitId])
+}
+
+model Item {
+  id             String   @id @default(cuid())
+  name           String
+  category       Category? @relation(fields: [categoryId], references: [id])
+  categoryId     String?
+  baseUnit       Unit     @relation("ItemBaseUnit", fields: [baseUnitId], references: [id])
+  baseUnitId     String
+  sellingUnit    Unit     @relation("ItemSellingUnit", fields: [sellingUnitId], references: [id])
+  sellingUnitId  String
+  isActive       Boolean  @default(true)
+  createdAt      DateTime @default(now())
+  updatedAt      DateTime @updatedAt
+
+  prices           ItemPrice[]
+  billItems        BillItem[]
+  billVersionItems BillVersionItem[]
+  inventoryTxns    InventoryTransaction[]
+  stockTransfers   StockTransfer[]
+  stockAdjustments StockAdjustment[]
+
+  @@unique([name])
+  @@index([isActive])
+}
+
+/// Price is date-effective: the price in force for a given date is the row
+/// with the latest effectiveDate <= that date. Never mutated once created —
+/// price changes always insert a new row (this itself doubles as the price
+/// history / audit trail).
+model ItemPrice {
+  id            String   @id @default(cuid())
+  item          Item     @relation(fields: [itemId], references: [id])
+  itemId        String
+  pricePerUnit  Decimal  @db.Decimal(14, 2) // price per one sellingUnit
+  effectiveDate DateTime // effective at 00:00 on this date
+  setBy         User     @relation("ItemPriceSetBy", fields: [setById], references: [id])
+  setById       String
+  createdAt     DateTime @default(now())
+
+  @@index([itemId, effectiveDate])
+}
+
+// ---------------------------------------------------------------------------
+// Bill Pads & Sequence Monitoring
+// ---------------------------------------------------------------------------
+
+/// Represents one physical bill pad's numbering context per shop. When
+/// Admin/Manager confirms "yes, this is a new pad", a new BillPad is opened
+/// and subsequent bills are sequenced against it instead of the old one.
+model BillPad {
+  id        String    @id @default(cuid())
+  shop      Shop      @relation(fields: [shopId], references: [id])
+  shopId    String
+  label     String? // optional human label, e.g. "Pad started 21 Sep 2026"
+  startedAt DateTime  @default(now())
+  closedAt  DateTime?
+
+  bills           Bill[]
+  sequenceEvents  BillSequenceEvent[]
+
+  @@index([shopId, closedAt])
+}
+
+enum SequenceEventType {
+  MISSING_NUMBER
+  OUT_OF_ORDER
+}
+
+enum SequenceEventStatus {
+  OPEN
+  ACKNOWLEDGED_NEW_PAD
+  ACKNOWLEDGED_INVESTIGATING
+  RESOLVED
+}
+
+model BillSequenceEvent {
+  id           String              @id @default(cuid())
+  billPad      BillPad             @relation(fields: [billPadId], references: [id])
+  billPadId    String
+  bill         Bill                @relation(fields: [billId], references: [id])
+  billId       String
+  type         SequenceEventType
+  details      String // e.g. "Bill 112 appears to be missing"
+  status       SequenceEventStatus @default(OPEN)
+  resolvedBy   User?               @relation("SequenceEventResolvedBy", fields: [resolvedById], references: [id])
+  resolvedById String?
+  resolvedAt   DateTime?
+  createdAt    DateTime            @default(now())
+
+  @@index([billPadId, status])
+}
+
+// ---------------------------------------------------------------------------
+// Bills, Versions, Reviews, Modification Requests, Attachments
+// ---------------------------------------------------------------------------
+
+enum BillStatus {
+  DRAFT
+  SUBMITTED
+  UNDER_REVIEW
+  APPROVED
+  DISPUTED
+}
+
+enum PaymentMethod {
+  CASH
+  UPI
+  CARD
+}
+
+/// The current, authoritative state of a bill. `currentVersion` always
+/// mirrors the latest BillVersion; historical versions are never deleted.
+model Bill {
+  id               String        @id @default(cuid())
+  shop             Shop          @relation(fields: [shopId], references: [id])
+  shopId           String
+  createdBy        User          @relation("BillCreatedBy", fields: [createdById], references: [id])
+  createdById      String
+  billNumber       Int
+  billPad          BillPad       @relation(fields: [billPadId], references: [id])
+  billPadId        String
+  billDate         DateTime
+  status           BillStatus    @default(SUBMITTED)
+  paymentMethod    PaymentMethod @default(CASH)
+  customerName     String?
+  customerPhone    String?
+  customerAddress  String?
+
+  calculatedAmount Decimal @db.Decimal(14, 2)
+  actualAmount     Decimal @db.Decimal(14, 2)
+  discountAmount   Decimal @db.Decimal(14, 2) // calculated - actual (can be negative)
+  discountPercent  Decimal @db.Decimal(6, 3)
+
+  attachment       BillAttachment? @relation(fields: [attachmentId], references: [id])
+  attachmentId     String?         @unique
+
+  currentVersionNo Int @default(1)
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  items                 BillItem[]
+  versions              BillVersion[]
+  reviews               BillReview[]
+  modificationRequests  BillModificationRequest[]
+  inventoryTransactions InventoryTransaction[]
+  sequenceEvents        BillSequenceEvent[]
+
+  @@unique([shopId, billPadId, billNumber])
+  @@index([shopId, status])
+  @@index([billDate])
+}
+
+model BillItem {
+  id           String  @id @default(cuid())
+  bill         Bill    @relation(fields: [billId], references: [id])
+  billId       String
+  item         Item    @relation(fields: [itemId], references: [id])
+  itemId       String
+  quantity     Decimal @db.Decimal(14, 3) // in selling unit as entered
+  unitLabel    String  // selling unit name captured at creation, for display stability
+  pricePerUnit Decimal @db.Decimal(14, 2) // price snapshot at time of billing
+  lineAmount   Decimal @db.Decimal(14, 2)
+  baseQuantity Decimal @db.Decimal(20, 6) // normalized to item's base/inventory unit
+
+  @@index([billId])
+  @@index([itemId])
+}
+
+/// Every modification to bill data creates a new immutable version. The
+/// original (version 1) is never deleted or edited in place.
+model BillVersion {
+  id               String   @id @default(cuid())
+  bill             Bill     @relation(fields: [billId], references: [id])
+  billId           String
+  versionNumber    Int
+  authoredBy       User     @relation("BillVersionAuthor", fields: [authoredById], references: [id])
+  authoredById     String
+  reason           String? // why this version was created (e.g. modification request reason)
+  billDate         DateTime
+  paymentMethod    PaymentMethod
+  customerName     String?
+  customerPhone    String?
+  customerAddress  String?
+  calculatedAmount Decimal  @db.Decimal(14, 2)
+  actualAmount     Decimal  @db.Decimal(14, 2)
+  discountAmount   Decimal  @db.Decimal(14, 2)
+  createdAt        DateTime @default(now())
+
+  items BillVersionItem[]
+
+  @@unique([billId, versionNumber])
+}
+
+model BillVersionItem {
+  id            String      @id @default(cuid())
+  billVersion   BillVersion @relation(fields: [billVersionId], references: [id])
+  billVersionId String
+  item          Item        @relation(fields: [itemId], references: [id])
+  itemId        String
+  quantity      Decimal     @db.Decimal(14, 3)
+  unitLabel     String
+  pricePerUnit  Decimal     @db.Decimal(14, 2)
+  lineAmount    Decimal     @db.Decimal(14, 2)
+  baseQuantity  Decimal     @db.Decimal(20, 6)
+
+  @@index([billVersionId])
+}
+
+enum BillReviewDecision {
+  APPROVED
+  DISPUTED
+}
+
+model BillReview {
+  id         String             @id @default(cuid())
+  bill       Bill               @relation(fields: [billId], references: [id])
+  billId     String
+  reviewer   User               @relation("BillReviewer", fields: [reviewerId], references: [id])
+  reviewerId String
+  decision   BillReviewDecision
+  reason     String? // required when decision = DISPUTED
+  createdAt  DateTime           @default(now())
+
+  @@index([billId])
+}
+
+enum ModificationRequestStatus {
+  PENDING
+  RESOLVED
+  DECLINED
+}
+
+model BillModificationRequest {
+  id           String                     @id @default(cuid())
+  bill         Bill                       @relation(fields: [billId], references: [id])
+  billId       String
+  requestedBy  User                       @relation("ModificationRequester", fields: [requestedById], references: [id])
+  requestedById String
+  reason       String
+  status       ModificationRequestStatus  @default(PENDING)
+  resolvedBy   User?                      @relation("ModificationResolver", fields: [resolvedById], references: [id])
+  resolvedById String?
+  resolvedAt   DateTime?
+  resultingVersionNo Int?
+  createdAt    DateTime                   @default(now())
+
+  @@index([billId, status])
+}
+
+/// The physical bill photo. Immutable once created; never replaced or
+/// deleted. Only metadata lives in Postgres — the binary lives in object
+/// storage under `objectKey`.
+model BillAttachment {
+  id           String   @id @default(cuid())
+  objectKey    String   @unique
+  mimeType     String
+  sizeBytes    Int
+  hash         String
+  uploadedById String
+  createdAt    DateTime @default(now())
+  bill         Bill?
+
+  @@index([uploadedById])
+}
+
+// ---------------------------------------------------------------------------
+// Inventory: transactions, transfers, adjustments
+// ---------------------------------------------------------------------------
+
+enum InventoryTransactionType {
+  RECEIVE
+  BILL_SALE
+  TRANSFER_OUT
+  TRANSFER_IN
+  ADJUSTMENT
+  BILL_CORRECTION
+}
+
+/// Current stock is always DERIVED (sum of quantityChange) from this table —
+/// never stored/overwritten directly. Quantities are in the item's base
+/// (inventory) unit.
+model InventoryTransaction {
+  id             String                    @id @default(cuid())
+  shop           Shop                      @relation(fields: [shopId], references: [id])
+  shopId         String
+  item           Item                      @relation(fields: [itemId], references: [id])
+  itemId         String
+  type           InventoryTransactionType
+  quantityChange Decimal                   @db.Decimal(20, 6) // positive or negative, base unit
+  bill           Bill?                     @relation(fields: [billId], references: [id])
+  billId         String?
+  stockTransfer  StockTransfer?            @relation(fields: [stockTransferId], references: [id])
+  stockTransferId String?
+  stockAdjustment StockAdjustment?         @relation(fields: [stockAdjustmentId], references: [id])
+  stockAdjustmentId String?
+  note           String?
+  performedBy    User                      @relation("InventoryTransactionBy", fields: [performedById], references: [id])
+  performedById  String
+  createdAt      DateTime                  @default(now())
+
+  @@index([shopId, itemId])
+  @@index([type])
+}
+
+model StockTransfer {
+  id           String   @id @default(cuid())
+  fromShop     Shop     @relation("TransferFromShop", fields: [fromShopId], references: [id])
+  fromShopId   String
+  toShop       Shop     @relation("TransferToShop", fields: [toShopId], references: [id])
+  toShopId     String
+  item         Item     @relation(fields: [itemId], references: [id])
+  itemId       String
+  quantity     Decimal  @db.Decimal(20, 6) // base unit
+  reason       String?
+  performedBy  User     @relation("StockTransferBy", fields: [performedById], references: [id])
+  performedById String
+  createdAt    DateTime @default(now())
+
+  inventoryTransactions InventoryTransaction[]
+
+  @@index([fromShopId])
+  @@index([toShopId])
+}
+
+model StockAdjustment {
+  id            String   @id @default(cuid())
+  shop          Shop     @relation(fields: [shopId], references: [id])
+  shopId        String
+  item          Item     @relation(fields: [itemId], references: [id])
+  itemId        String
+  systemStock   Decimal  @db.Decimal(20, 6) // stock as computed at time of adjustment
+  physicalStock Decimal  @db.Decimal(20, 6) // stock counted physically
+  quantityDelta Decimal  @db.Decimal(20, 6) // physical - system
+  reason        String
+  performedBy   User     @relation("StockAdjustmentBy", fields: [performedById], references: [id])
+  performedById String
+  createdAt     DateTime @default(now())
+
+  inventoryTransactions InventoryTransaction[]
+
+  @@index([shopId, itemId])
+}
+
+// ---------------------------------------------------------------------------
+// Notifications & Audit
+// ---------------------------------------------------------------------------
+
+enum NotificationType {
+  PENDING_BILL_REVIEW
+  BILL_DISPUTED
+  BILL_SEQUENCE_MISMATCH
+  MISSING_BILL_NUMBER
+  NEGATIVE_STOCK
+  MODIFICATION_REQUESTED
+  OTHER
+}
+
+enum NotificationStatus {
+  UNREAD
+  READ
+}
+
+model Notification {
+  id        String             @id @default(cuid())
+  user      User               @relation(fields: [userId], references: [id])
+  userId    String
+  type      NotificationType
+  title     String
+  message   String
+  status    NotificationStatus @default(UNREAD)
+  entityType String?
+  entityId   String?
+  createdAt DateTime           @default(now())
+  readAt    DateTime?
+
+  @@index([userId, status])
+}
+
+model AuditLog {
+  id           String   @id @default(cuid())
+  user         User?    @relation(fields: [userId], references: [id])
+  userId       String?
+  action       String   // e.g. "PRICE_CHANGED", "BILL_DISPUTED", "STOCK_ADJUSTED"
+  entityType   String
+  entityId     String
+  beforeData   Json?
+  afterData    Json?
+  ipAddress    String?
+  createdAt    DateTime @default(now())
+
+  @@index([entityType, entityId])
+  @@index([userId])
+  @@index([action])
+}
